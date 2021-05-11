@@ -1,0 +1,264 @@
+```{r Load Libraries}
+library(readxl)
+library(reshape2)
+library(data.table)
+library(dplyr)
+library(rstanarm)
+library(ggplot2)
+library(bayesplot)
+library(rstan)
+```
+
+```{r % > 0 formula}
+percent_above_zero <- function(model, variable_pos){
+  return ( sum(data.frame(extract(model$stanfit))[,variable_pos] > 0) / length((data.frame(extract(model$stanfit))[,variable_pos])) )
+  
+}
+
+percent_above_zero(modelAType, 11)
+
+```
+
+```{r Data Import and Setup}
+
+#Read in data from spreadsheet
+Research_Data <- read_excel("../../Data/Research_Data_Anonymized.xlsx")
+Research_Data
+  
+#Checks who attended both days and saves it in variable 'Full_Attendance'
+Research_Data = Research_Data %>% mutate(Full_Attendance = !is.na(D2_Color) & !is.na(D1_Color))
+
+#Melt data by quiz
+data_by_quiz = melt(data = setDT(Research_Data),
+variable.name = "Quiz",
+id.vars = c("ID", "Section", "Age", "D1_Method", "D2_Method", "246_Required","Highschool_Stats","Num_Tried_D1","Num_Tried_D2","Pre_Homework_Score_Average","Pre_Homework_Average_Incorrect","Avg_Conf","P_Overall_Score", "P_Total_Type_Correct", "P_Total_Cond_Correct","Full_Attendance"),
+measure = patterns("Day", "_Color", "_Method", 
+"1_Type_Key",	"1_Type_Answer",	"1_Type_Correct",	"1_Cond_Key",	"1_Cond_Answer",	"1_Cond_Correct", "1_Conf",
+"2_Type_Key",	"2_Type_Answer",	"2_Type_Correct",	"2_Cond_Key",	"2_Cond_Answer",	"2_Cond_Correct", "2_Conf",
+"3_Type_Key",	"3_Type_Answer",	"3_Type_Correct",	"3_Cond_Key",	"3_Cond_Answer",	"3_Cond_Correct", "3_Conf",
+"4_Type_Key",	"4_Type_Answer",	"4_Type_Correct",	"4_Cond_Key",	"4_Cond_Answer",	"4_Cond_Correct", "4_Conf",
+"5_Type_Key",	"5_Type_Answer",	"5_Type_Correct",	"5_Cond_Key",	"5_Cond_Answer",	"5_Cond_Correct", "5_Conf",
+"_Total_Type_Correct", "_Total_Cond_Correct", "_Overall_Score"), 
+value.name = c("Day", "Color", "Method", 
+"1_Type_Key",	"1_Type_Answer",	"1_Type_Correct",	"1_Cond_Key",	"1_Cond_Answer",	"1_Cond_Correct", "1_Conf",
+"2_Type_Key",	"2_Type_Answer",	"2_Type_Correct",	"2_Cond_Key",	"2_Cond_Answer",	"2_Cond_Correct", "2_Conf",
+"3_Type_Key",	"3_Type_Answer",	"3_Type_Correct",	"3_Cond_Key",	"3_Cond_Answer",	"3_Cond_Correct", "3_Conf",
+"4_Type_Key",	"4_Type_Answer",	"4_Type_Correct",	"4_Cond_Key",	"4_Cond_Answer",	"4_Cond_Correct", "4_Conf",
+"5_Type_Key",	"5_Type_Answer",	"5_Type_Correct",	"5_Cond_Key",	"5_Cond_Answer",	"5_Cond_Correct", "5_Conf",
+"Total_Type_Correct", "Total_Cond_Correct", "Overall_Score"))
+
+data_by_quiz = data_by_quiz[as.numeric(Quiz) <= 3]
+data_by_quiz
+
+#Melt data by quiz question
+data_by_quiz = data_by_quiz %>% mutate(Type_Pretest_Score = P_Total_Type_Correct) %>% mutate(Cond_Pretest_Score = P_Total_Cond_Correct) %>% select(-c(P_Total_Type_Correct, P_Total_Cond_Correct))
+data_by_questions = melt(data = setDT(data_by_quiz), 
+id.vars = c("ID", "Section", "Day", "Color","D1_Method","Method","Age","246_Required","Num_Tried_D2","P_Overall_Score","Type_Pretest_Score","Cond_Pretest_Score","Pre_Homework_Score_Average","Pre_Homework_Average_Incorrect","Avg_Conf","Full_Attendance"), 
+measure = patterns("_Type_Key", "_Type_Answer", "_Type_Correct", "_Cond_Key", "_Cond_Answer", "_Cond_Correct", "_Conf"), 
+value.name = c("Type_Key", "Type_Answer", "Type_Correct", "Cond_Key", "Cond_Answer", "Cond_Correct", "Conf"))
+
+data_by_questions = data_by_questions[!(is.na(data_by_questions$Color))]
+data_by_questions = data_by_questions[data_by_questions$variable != '6' & data_by_questions$variable != '7']
+data_by_questions 
+
+#Setting up Hypothesis 1 Data
+hypothesis_1_data = data_by_questions[data_by_questions$Day != 0,]
+
+hypothesis_1_data$Cond_Correct = as.numeric(as.factor(hypothesis_1_data$Cond_Correct))-1
+hypothesis_1_data$Type_Correct = as.numeric(as.factor(hypothesis_1_data$Type_Correct))-1
+
+#method
+hypothesis_1_data$Method = as.factor(hypothesis_1_data$Method)
+hypothesis_1_data$D1_Method = as.factor(hypothesis_1_data$D1_Method)
+
+#day
+hypothesis_1_data$Day = as.factor(hypothesis_1_data$Day)
+
+#types
+hypothesis_1_data$OneZ = hypothesis_1_data$Type_Key == "A"
+hypothesis_1_data$TwoZ = hypothesis_1_data$Type_Key == "B"
+hypothesis_1_data$OneT = hypothesis_1_data$Type_Key == "C"
+hypothesis_1_data$TwoT = hypothesis_1_data$Type_Key == "D"
+hypothesis_1_data$Other = hypothesis_1_data$Type_Key == "E"
+hypothesis_1_data = hypothesis_1_data %>% mutate(Z_Test = OneZ | TwoZ)
+hypothesis_1_data = hypothesis_1_data %>% mutate(One_Sam = OneZ | OneT)
+
+#Configures Conf Data
+hypothesis_1_data$Conf =as.numeric(hypothesis_1_data$Conf)
+
+#246 Required
+hypothesis_1_data$'246_Required' = as.factor(hypothesis_1_data$'246_Required')
+
+hypothesis_1_data = hypothesis_1_data %>% mutate(Honors  = (Section == 501))
+
+hypothesis_1_data = hypothesis_1_data %>% mutate(Dif_Conf  = (Conf - Avg_Conf))
+
+
+#Toggle Full Attendance Requirement
+#hypothesis_1_data = hypothesis_1_data %>% filter(Full_Attendance)
+
+#hypothesis_1_data = na.omit(hypothesis_1_data)
+hypothesis_1_data
+
+pooled = melt(data = setDT(data_by_quiz), 
+id.vars = c("ID", "Section", "Day", "Color","D1_Method","Method","Age","246_Required","Num_Tried_D2","P_Overall_Score","Type_Pretest_Score","Cond_Pretest_Score","Pre_Homework_Score_Average","Pre_Homework_Average_Incorrect","Avg_Conf","Full_Attendance"), 
+measure = patterns("_Correct"), 
+value.name = c("Correct"),
+variable.name = "Quiz")
+pooled = na.omit(pooled)
+pooled = pooled[which(pooled$Correct <= 1)]
+pooled
+```
+
+```{r Model A}
+
+#Using Method
+#modelAType = stan_glm(Type_Correct ~ Method*Day + Z_Test + One_Sam + Other + Conf + Honors + Type_Pretest_Score + Age,
+                                  #data=data.frame(hypothesis_1_data),
+                                  #family = "binomial")
+
+#modelACond = stan_glm(Cond_Correct ~ Method*Day + Z_Test + One_Sam + Other + Conf + Honors + Type_Pretest_Score + Age,
+                                  #data=data.frame(hypothesis_1_data),
+                                  #family = "binomial")
+
+#summary(modelAType)
+#summary(modelACond)
+#mcmc_intervals(as.matrix(modelAType),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day2","MethodWorksheet:Day2")) + ggtitle("Type Dist. Using Method")
+#mcmc_intervals(as.matrix(modelACond),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day2","MethodWorksheet:Day2")) + ggtitle("Cond Dist. Using Method")
+
+#Using D1_Method
+modelAType = stan_glm(Type_Correct ~ D1_Method*Day + Z_Test + One_Sam + Other + Conf + Honors + Type_Pretest_Score + Age,
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+modelACond = stan_glm(Cond_Correct ~ D1_Method*Day + Z_Test + One_Sam + Other + Conf + Honors + Type_Pretest_Score + Age,
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+summary(modelAType)
+summary(modelACond)
+mcmc_intervals(as.matrix(modelAType),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day2","D1_MethodWorksheet:Day2")) + ggtitle("Type Dist. of Model A") + scale_y_discrete(labels = c(
+      "D1_MethodWorksheet:Day2" = "Day 2 - Worksheet Interaction",
+      "D1_MethodWorksheet" = "Worksheet",
+      "Day2" = "Day 2"
+      )
+    )
+percent_above_zero(modelAType, 3)
+mcmc_intervals(as.matrix(modelACond),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day2","D1_MethodWorksheet:Day2")) + ggtitle("Condition Dist. of Model A") + scale_y_discrete(labels = c(
+      "D1_MethodWorksheet:Day2" = "Day 2 - Worksheet Interaction",
+      "D1_MethodWorksheet" = "Worksheet",
+      "Day2" = "Day 2"
+      )
+    )
+percent_above_zero(modelACond, 2)
+```
+
+```{r Model B}
+
+#Using Method
+#modelBType = stan_glm(Type_Correct ~ Method*Day + Z_Test + One_Sam + Other + Dif_Conf + Honors + Type_Pretest_Score + Age,
+                                  #data=data.frame(hypothesis_1_data),
+                                  #family = "binomial")
+
+#modelBCond = stan_glm(Cond_Correct ~ Method*Day + Z_Test + One_Sam + Other + Dif_Conf + Honors + Type_Pretest_Score + Age,
+                                  #data=data.frame(hypothesis_1_data),
+                                  #family = "binomial")
+
+#summary(modelBType)
+#summary(modelBCond)
+#mcmc_intervals(as.matrix(modelBType),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day2","MethodWorksheet:Day2")) + ggtitle("Type Dist. Using Method")
+#mcmc_intervals(as.matrix(modelBCond),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day2","MethodWorksheet:Day2")) + ggtitle("Cond Dist. Using Method")
+
+#Using Method
+modelBType = stan_glm(Type_Correct ~ D1_Method*Day + Z_Test + One_Sam + Other + Dif_Conf + Honors + Type_Pretest_Score + Age,
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+modelBCond = stan_glm(Cond_Correct ~ D1_Method*Day + Z_Test + One_Sam + Other + Dif_Conf + Honors + Type_Pretest_Score + Age,
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+summary(modelBType)
+summary(modelBCond)
+mcmc_intervals(as.matrix(modelBType),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day2","D1_MethodWorksheet:Day2")) + ggtitle("Type Dist. of Model B") + scale_y_discrete(labels = c(
+      "D1_MethodWorksheet:Day2" = "Day 2 - Worksheet Interaction",
+      "D1_MethodWorksheet" = "Worksheet",
+      "Day2" = "Day 2"
+      )
+    )
+percent_above_zero(modelBType, 3)
+mcmc_intervals(as.matrix(modelBCond),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day2","D1_MethodWorksheet:Day2")) + ggtitle("Condition Dist. of Model B") + scale_y_discrete(labels = c(
+      "D1_MethodWorksheet:Day2" = "Day 2 - Worksheet Interaction",
+      "D1_MethodWorksheet" = "Worksheet",
+      "Day2" = "Day 2"
+      )
+    )
+```
+
+```{r Model C}
+
+#Using Method
+modelCType = stan_glmer(Type_Correct ~ Method*Day + Z_Test + One_Sam + Other + Dif_Conf + (1|ID),
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+modelCCond = stan_glmer(Cond_Correct ~ Method*Day + Z_Test + One_Sam + Other + Dif_Conf + (1|ID),
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+summary(modelCType)
+summary(modelCCond)
+mcmc_intervals(as.matrix(modelCType),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day2","MethodWorksheet:Day2")) + ggtitle("Type Dist. Using Method")
+mcmc_intervals(as.matrix(modelCCond),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day2","MethodWorksheet:Day2")) + ggtitle("Cond Dist. Using Method")
+
+#Using D1_Method
+modelCType = stan_glmer(Type_Correct ~ D1_Method*Day + Z_Test + One_Sam + Other + Dif_Conf + (1|ID),
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+
+modelCCond = stan_glmer(Cond_Correct ~ D1_Method*Day + Z_Test + One_Sam + Other + Dif_Conf + (1|ID),
+                                  data=data.frame(hypothesis_1_data),
+                                  family = "binomial")
+summary(modelCType)
+summary(modelCCond)
+mcmc_intervals(as.matrix(modelCType),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day2","D1_MethodWorksheet:Day2")) + ggtitle("Type Dist. Using D1_Method")
+mcmc_intervals(as.matrix(modelCCond),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day2","D1_MethodWorksheet:Day2")) + ggtitle("Cond Dist. Using D1_Method")
+```
+
+```{r Model I}
+
+#Using Method
+#modelIType = stan_glmer(Total_Type_Correct ~ Method*Day + Avg_Conf + P_Overall_Score + Type_Pretest_Score + Age + (1|ID) + as.factor(Section),
+                                  #data=data.frame(data_by_quiz[data_by_quiz$Day != 0,]))
+
+#modelICond = stan_glmer(Total_Cond_Correct  ~ Method*Day + Avg_Conf + P_Overall_Score + Cond_Pretest_Score + Age + (1|ID) + as.factor(Section),
+                                  #data=data.frame(data_by_quiz[data_by_quiz$Day != 0,]))
+
+#summary(modelIType)
+#summary(modelICond)
+#mcmc_intervals(as.matrix(modelIType),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day","MethodWorksheet:Day")) + ggtitle("Type Dist. Using Method")
+#mcmc_intervals(as.matrix(modelICond),prob = .80, prob_outer = .95, pars = c("MethodWorksheet","Day","MethodWorksheet:Day")) + ggtitle("Cond Dist. Using Method")
+
+#Using D1_Method
+modelIType_D1 = stan_glmer(Total_Type_Correct ~ D1_Method*Day + Avg_Conf + P_Overall_Score + Type_Pretest_Score + Age + (1|ID) + as.factor(Section),
+                                  data=data.frame(data_by_quiz[data_by_quiz$Day != 0,]))
+
+modelICond_D1 = stan_glmer(Total_Cond_Correct  ~ D1_Method*Day + Avg_Conf + P_Overall_Score + Cond_Pretest_Score + Age + (1|ID) + as.factor(Section),
+                                  data=data.frame(data_by_quiz[data_by_quiz$Day != 0,]))
+summary(modelIType_D1)
+summary(modelICond_D1)
+mcmc_intervals(as.matrix(modelIType_D1),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day","D1_MethodWorksheet:Day")) + ggtitle("Type Dist. of Model I")
+percent_above_zero(modelAType, 9) + scale_y_discrete(labels = c(
+      "D1_MethodWorksheet:Day2" = "Day 2 - Worksheet Interaction",
+      "D1_MethodWorksheet" = "Worksheet",
+      "Day2" = "Day 2"
+      )
+    )
+mcmc_intervals(as.matrix(modelICond_D1),prob = .80, prob_outer = .95, pars = c("D1_MethodWorksheet","Day","D1_MethodWorksheet:Day")) + ggtitle("Condition Dist. of Model I")
+percent_above_zero(modelAType, 2) + scale_y_discrete(labels = c(
+      "D1_MethodWorksheet:Day2" = "Day 2 - Worksheet Interaction",
+      "D1_MethodWorksheet" = "Worksheet",
+      "Day2" = "Day 2"
+      )
+    )
+```

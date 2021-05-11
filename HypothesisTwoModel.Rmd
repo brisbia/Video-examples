@@ -1,0 +1,343 @@
+```{r Load Libraries}
+library(readxl)
+library(reshape2)
+library(data.table)
+library(plyr)
+library(dplyr)
+library(rstanarm)
+library(ggplot2)
+library(bayesplot)
+library(brms)
+library("lmPerm")
+library("coin")
+library("gtools")
+library(rstan)
+```
+
+```{r Data Import}
+
+#Read in data from spreadsheet
+Research_Data <- read_excel("../../Data/Research_Data_Anonymized.xlsx")
+
+Research_Data
+#Checks who attended both days and saves it in variable 'Full_Attendance'
+Research_Data = Research_Data %>% mutate(Full_Attendance = !is.na(D2_Color) & !is.na(D1_Color))
+
+#Format Data
+data_by_day = melt(data = setDT(Research_Data), 
+                   variable.name = "Day", 
+                   id.vars = c("ID", "Section", "Age", "Num_Tried_D1","Num_Tried_D2","Pre_Homework_Score_Average","D1_Method","D2_Method","Full_Attendance"),
+                   measure = patterns("P_1","P_2","P_3","P_4","P_5","P_6","P_7","P_8","P_9","P_10","P_11"),
+                   value.name = c("P_1","P_2","P_3","P_4","P_5","P_6","P_7","P_8","P_9","P_10","P_11"))
+data_by_day = data_by_day[data_by_day$Day == '2' | data_by_day$Day == '1' ,]
+data_by_day$Method = ""
+data_by_day$Num_Tried = 0
+for(ii in 1:nrow(data_by_day)){
+  if(data_by_day$Day[ii] == '1'){
+    data_by_day$Method[ii] = data_by_day$D1_Method[ii]
+    data_by_day$Num_Tried[ii] = data_by_day$Num_Tried_D1[ii]
+  }else{
+    data_by_day$Method[ii] = data_by_day$D2_Method[ii]
+    data_by_day$Num_Tried[ii] = data_by_day$Num_Tried_D2[ii]
+  }
+}
+data_by_day
+
+data_by_practice_problem = melt(data = setDT(data_by_day), variable.name = "Practice_Problem", id.vars = c("ID","Section","Method","D1_Method","Num_Tried_D1","Num_Tried_D2","Pre_Homework_Score_Average","Day","Num_Tried","Age","Full_Attendance"), measure = patterns("P_"), value.name=c("Dificulty"))
+data_by_practice_problem = data_by_practice_problem[data_by_practice_problem$Dificulty!='X',]
+data_by_practice_problem$Dificulty = as.numeric(as.factor(na.omit(data_by_practice_problem$Dificulty)))
+data_by_practice_problem$Section = as.factor(data_by_practice_problem$Section)
+data_by_practice_problem$Hard = 0
+data_by_practice_problem$SemiHard = 0
+tick = 0
+for(ii in 1:nrow(data_by_practice_problem)){
+  if(data_by_practice_problem$Dificulty[ii] >= 5){
+    data_by_practice_problem$Hard[ii] = 1
+
+  }
+    if(data_by_practice_problem$Dificulty[ii] >= 4){
+    data_by_practice_problem$SemiHard[ii] = 1
+        tick = tick + 1
+  }
+}
+
+#Toggle Full Attendance Requirement
+data_by_practice_problem = data_by_practice_problem %>% filter(Full_Attendance)
+
+data_by_practice_problem$Practice_ProblemDay = as.factor(paste(data_by_practice_problem$Practice_Problem,data_by_practice_problem$Day,sep = ","))
+data_by_practice_problem
+
+
+"hard"
+sum(data_by_practice_problem$SemiHard)
+length(data_by_practice_problem$SemiHard)
+sum(data_by_practice_problem$SemiHard) / length(data_by_practice_problem$SemiHard)
+
+```
+
+```{r Multi level Dificulty model}
+#with Method
+multilevel_diff_model = brm(Dificulty ~ Num_Tried_D1 + Method * Day  + Section + (1|ID),
+                                  data=data.frame(data_by_practice_problem),
+                                  family=cumulative("logit"),
+                                  )
+summary(multilevel_diff_model)
+
+
+mcmc_intervals(multilevel_diff_model, pars=c("b_Num_Tried_D1","b_MethodWorksheet","b_Day2","b_Section501","b_MethodWorksheet:Day2"), prob = .80, prob_outer = .95)  + ggtitle("Multi-Level Difficulty Model") + scale_y_discrete(labels = c(
+      "b_Num_Tried_D1" = "# of Attempted Practice Problems",
+      "b_MethodWorksheet" = "Worksheet",
+      "b_Section501" = "Honors",
+      "b_Day2" = "Day 2",
+      "b_MethodWorksheet:Day2" = "Interaction Term"
+      )
+    )
+
+#with D_1 Method
+#multilevel_diff_model_order = brm(Dificulty ~ Num_Tried_D1 + D1_Method * Day  + Section + (1|ID),
+                                  #data=data.frame(data_by_practice_problem),
+                                  #family=cumulative("logit"),
+                                  #)
+#summary(multilevel_diff_model_order)
+
+
+#multilevel_diff_model$fit
+
+
+```
+
+```{r}
+model_multilevel_hard <- stan_glm(SemiHard ~ Num_Tried_D1 + Method*Day + Section ,
+                    data = data.frame(data_by_practice_problem),
+                    family=binomial(link = "logit"),
+                    prior = normal(),
+                    prior_intercept = normal()
+                    )
+summary(model_multilevel_hard,probs = c(0.025, 0.975), digits = 3)
+mcmc_intervals(model_multilevel_hard, pars=c("MethodWorksheet","Day2","Section501","MethodWorksheet:Day2","Num_Tried_D1"),prob=.8, prob_outer=.95) + ggtitle("Multi-Level Difficulty Model") + scale_y_discrete(labels = c(
+      "Num_Tried_D1" = "# of Attempted Practice Problems",
+      "MethodWorksheet" = "Worksheet",
+      "Section501" = "Honors",
+      "Day2" = "Day 2",
+      "MethodWorksheet:Day2" = "Interaction Term"
+      )
+    )
+
+#model_multilevel_hard_D1 <- stan_glm(SemiHard ~ Num_Tried_D1 + D1_Method*Day + Section ,
+                    #data = data.frame(data_by_practice_problem),
+                    #family=binomial(link = "logit"),
+                    #prior = normal(),
+                    #prior_intercept = normal()
+                    #)
+#summary(model_multilevel_hard_D1,probs = c(0.025, 0.975), digits = 3)
+#mcmc_areas(model_multilevel_hard_D1, pars=c("D1_MethodWorksheet","Day2","Section501","D1_MethodWorksheet:Day2","Num_Tried_D1"),prob=.8, prob_outer=.95) + ggtitle("Multi Level Diff Using D1_Method")
+#percent_above_zero(model_multilevel_hard_D1, 3)
+#percent_above_zero(model_multilevel_hard_D1, 6)
+
+```
+
+```{r Exspected values}
+data = data_by_practice_problem[1,]
+model = model_multilevel_hard_D1
+data$Section = as.factor(501)
+#data_by_practice_problem_test$Section = as.factor(501)
+data$Num_Tried_D1 = 8 #class average rounded up from 7.62222222222222
+
+#video day 1
+data$Method = "Videos"
+data$D1_Method = "Videos"
+data$Day = as.factor(1)
+"Videos day 1"
+log_odds = predict(model, newdata = data)
+exp(1)^log_odds / (1 + exp(1)^log_odds)
+
+#video day 2
+data$Method = "Videos"
+data$D1_Method = "Videos"
+data$Day = as.factor(2)
+"Videos day 2"
+log_odds = predict(model, newdata = data)
+exp(1)^log_odds / (1 + exp(1)^log_odds)
+
+#Worksheet day 1
+data$Method = "Worksheet"
+data$D1_Method = "Worksheet"
+data$Day = as.factor(1)
+"Worksheet day 1"
+log_odds = predict(model, newdata = data)
+exp(1)^log_odds / (1 + exp(1)^log_odds)
+
+#Worksheet day 2
+data$Method = "Worksheet"
+data$D1_Method = "Worksheet"
+data$Day = as.factor(2)
+"Worksheet day 2"
+log_odds = predict(model, newdata = data)
+exp(1)^log_odds / (1 + exp(1)^log_odds)
+
+```
+
+
+```{r Perm Test}
+n = 10000
+shuffle_data = data_by_practice_problem
+actual_value = sum(shuffle_data$SemiHard[shuffle_data$D1_Method=="Worksheet" & shuffle_data$Day == 2])
+count = 0
+actual_value
+for(ii in 1:n){
+  temp = transform(shuffle_data, SemiHard = sample(SemiHard))
+  temp_sum = sum(temp$SemiHard[temp$D1_Method=="Worksheet"  & shuffle_data$Day == 2])
+  if(temp_sum >= actual_value){
+    count = count + 1
+  }
+}
+
+count
+
+(count + 1)/(n+1)
+```
+
+```{r Average Diff Perm Test Redone}
+
+n = 10000
+perm_test_data = Research_Data %>% filter(Full_Attendance)
+
+perm_test_data = perm_test_data[!is.na(perm_test_data$Average_Dif),]
+
+
+sum(perm_test_data$Average_Dif)
+actual_value = sum(perm_test_data$Average_Dif[perm_test_data$D1_Method=="Worksheet"])
+count = 0
+actual_value
+for(ii in 1:n){
+  temp = transform(perm_test_data, Average_Dif = sample(Average_Dif))
+  temp_sum = sum(temp$Average_Dif[temp$D1_Method=="Worksheet"])
+  if(temp_sum >= actual_value){
+    count = count + 1
+  }
+}
+
+count
+
+(count + 1)/(n+1)
+
+
+
+
+```
+
+```{r Average Above 4 Perm Test Redone}
+n = 10000
+Research_Data_No_X <- read_excel("../../Data/Research_Data_No_X_Anonymized.xlsx")
+
+#Checks who attended both days and saves it in variable 'Full_Attendance'
+Research_Data_No_X = Research_Data_No_X %>% mutate(Full_Attendance = !is.na(D2_Color) & !is.na(D1_Color))
+
+Research_Data_No_X
+perm_test_data = Research_Data_No_X %>% filter(Full_Attendance)
+
+perm_test_data = perm_test_data[!is.na(perm_test_data$Average_Dif),]
+
+perm_test_data = perm_test_data %>% mutate(MP_1 = MP_1 >=4 & !is.na(MP_1))
+perm_test_data = perm_test_data %>% mutate(MP_2 = MP_2 >=4 & !is.na(MP_2))
+perm_test_data = perm_test_data %>% mutate(MP_3 = MP_3 >=4 & !is.na(MP_3))
+perm_test_data = perm_test_data %>% mutate(MP_4 = MP_4 >=4 & !is.na(MP_4))
+perm_test_data = perm_test_data %>% mutate(MP_5 = MP_5 >=4 & !is.na(MP_5))
+perm_test_data = perm_test_data %>% mutate(MP_6 = MP_6 >=4 & !is.na(MP_6))
+perm_test_data = perm_test_data %>% mutate(MP_7 = MP_7 >=4 & !is.na(MP_7))
+perm_test_data = perm_test_data %>% mutate(MP_8 = MP_8 >=4 & !is.na(MP_8))
+perm_test_data = perm_test_data %>% mutate(MP_9 = MP_9 >=4 & !is.na(MP_9))
+perm_test_data = perm_test_data %>% mutate(MP_10 = MP_10 >=4 & !is.na(MP_10))
+perm_test_data = perm_test_data %>% mutate(MP_11 = MP_11 >=4 & !is.na(MP_11))
+
+perm_test_data = perm_test_data %>% mutate(FP_1 = FP_1 >=4 & !is.na(FP_1))
+perm_test_data = perm_test_data %>% mutate(FP_2 = FP_2 >=4 & !is.na(FP_2))
+perm_test_data = perm_test_data %>% mutate(FP_3 = FP_3 >=4 & !is.na(FP_3))
+perm_test_data = perm_test_data %>% mutate(FP_4 = FP_4 >=4 & !is.na(FP_4))
+perm_test_data = perm_test_data %>% mutate(FP_5 = FP_5 >=4 & !is.na(FP_5))
+perm_test_data = perm_test_data %>% mutate(FP_6 = FP_6 >=4 & !is.na(FP_6))
+perm_test_data = perm_test_data %>% mutate(FP_7 = FP_7 >=4 & !is.na(FP_7))
+perm_test_data = perm_test_data %>% mutate(FP_8 = FP_8 >=4 & !is.na(FP_8))
+perm_test_data = perm_test_data %>% mutate(FP_9 = FP_9 >=4 & !is.na(FP_9))
+perm_test_data = perm_test_data %>% mutate(FP_10 = FP_10 >=4 & !is.na(FP_10))
+perm_test_data = perm_test_data %>% mutate(FP_11 = FP_11 >=4 & !is.na(FP_11))
+
+perm_test_data = perm_test_data %>% mutate(D1_Avg_Diff = ((MP_1 + MP_2 + MP_3 +MP_4 +MP_5 + MP_6 + MP_7 + MP_8 + MP_9 + MP_10 + MP_11) /Num_Tried_D1))
+
+perm_test_data = perm_test_data %>% mutate(D2_Avg_Diff = ((FP_1 + FP_2 + FP_3 +FP_4 +FP_5 + FP_6 + FP_7 +FP_8 +FP_9 +FP_9 + FP_10 + FP_11) / Num_Tried_D2))
+
+
+perm_test_data = perm_test_data %>% mutate(Hard_Dif = ((FP_1 + FP_2 + FP_3 +FP_4 +FP_5 + FP_6 + FP_7 +FP_8 +FP_9 +FP_9 + FP_10 + FP_11) / Num_Tried_D2) - ((MP_1 + MP_2 + MP_3 +MP_4 +MP_5 + MP_6 + MP_7 + MP_8 + MP_9 + MP_10 + MP_11) /Num_Tried_D1) )
+ 
+perm_test_data$Hard_Dif                                         
+
+sum(perm_test_data$Hard_Dif)
+actual_value = sum(perm_test_data$Hard_Dif[perm_test_data$D1_Method=="Worksheet"])
+count = 0
+actual_value
+for(ii in 1:n){
+  temp = transform(perm_test_data, Hard_Dif = sample(Hard_Dif))
+  temp_sum = sum(temp$Hard_Dif[temp$D1_Method=="Worksheet"])
+  if(temp_sum >= actual_value){
+    count = count + 1
+  }
+}
+
+count
+
+(count + 1)/(n+1)
+
+
+
+
+```
+
+
+```{r Average Difficulty based on attendance}
+Research_Data_No_X_Avg <- read_excel("../../Data/Research_Data_No_X_Anonymized.xlsx")
+
+#Checks who attended both days and saves it in variable 'Full_Attendance'
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(Full_Attendance = !is.na(D2_Color) & !is.na(D1_Color))
+
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_1 = MP_1 >=4 & !is.na(MP_1))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_2 = MP_2 >=4 & !is.na(MP_2))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_3 = MP_3 >=4 & !is.na(MP_3))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_4 = MP_4 >=4 & !is.na(MP_4))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_5 = MP_5 >=4 & !is.na(MP_5))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_6 = MP_6 >=4 & !is.na(MP_6))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_7 = MP_7 >=4 & !is.na(MP_7))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_8 = MP_8 >=4 & !is.na(MP_8))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_9 = MP_9 >=4 & !is.na(MP_9))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_10 = MP_10 >=4 & !is.na(MP_10))
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(MP_11 = MP_11 >=4 & !is.na(MP_11))
+
+Research_Data_No_X_Avg = Research_Data_No_X_Avg %>% mutate(D1_Avg_Diff_Prop = ((MP_1 + MP_2 + MP_3 +MP_4 +MP_5 + MP_6 + MP_7 + MP_8 + MP_9 + MP_10 + MP_11) / Num_Tried_D1))
+mean(na.omit(Research_Data_No_X_Avg$D1_Avg_Diff_Prop))
+mean(na.omit(Research_Data_No_X_Avg[which(Research_Data_No_X_Avg$Full_Attendance == TRUE),]$D1_Avg_Diff_Prop))
+
+mean(na.omit(Research_Data_No_X_Avg[!Research_Data_No_X_Avg$Full_Attendance,]$D1_Avg_Diff_Prop))
+
+```
+
+```{r Attendance Permuation Test}
+n = 1000
+
+shuffle_data = Research_Data
+shuffle_data = shuffle_data %>% mutate(Full_Attendance = !is.na(D2_Color) & !is.na(D1_Color))
+actual_value = length(which(shuffle_data$Full_Attendance[shuffle_data$D1_Method=="Worksheet"]))
+count = 0
+actual_value
+for(ii in 1:n){
+  temp = shuffle_data %>% 
+    group_by(Section) %>% 
+    mutate(Full_Attendance = Full_Attendance[sample(row_number())])
+  temp_sum = length(which(temp$Full_Attendance[temp$D1_Method=="Worksheet"]))
+  if(temp_sum >= actual_value){
+    count = count + 1
+  }
+}
+
+count
+
+(count + 1)/(n+1)
+```
